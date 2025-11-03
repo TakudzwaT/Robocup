@@ -299,21 +299,28 @@ class Agent(Base_Agent):
             # Check if path to goal is clear (reuse the fast test)
             clear_shot = self._fast_clear_test(ball, opponent_goal, strategyData.opponent_positions)
 
-            # 1️⃣ Try SHOOT — if close and clear
-            if dist_ball_to_goal < 5.0 and clear_shot:
+            # Check opponent pressure
+            min_opp_dist = strategyData.min_opponent_ball_dist
+            under_pressure = min_opp_dist < 1.5
+
+            # 1️⃣ Try SHOOT — if close and clear, or under pressure with decent shot
+            if (dist_ball_to_goal < 5.0 and clear_shot) or (under_pressure and dist_ball_to_goal < 8.0 and clear_shot):
                 return opponent_goal, "SHOOT"
 
             # 2️⃣ Try PASS — if a good teammate is open
             receiver_pos, receiver_score = self._fast_find_pass_target(strategyData)
-            if receiver_pos is not None and receiver_score > 0.35:
+            # Adjust pass threshold based on pressure
+            pass_threshold = 0.35 if not under_pressure else 0.25
+            if receiver_pos is not None and receiver_score > pass_threshold:
                 return receiver_pos, "PASS"
 
-            # 3️⃣ Otherwise DRIBBLE — move forward toward goal
+            # 3️⃣ Otherwise DRIBBLE — more aggressive when under pressure
+            dribble_dist = 1.5 if under_pressure else 2.5
             goal_dir = opponent_goal - ball
             if np.linalg.norm(goal_dir) < 1e-6:
                 goal_dir = np.array([1.0, 0.0])
             goal_dir /= np.linalg.norm(goal_dir)
-            dribble_target = ball + goal_dir * 2.5
+            dribble_target = ball + goal_dir * dribble_dist
             return dribble_target, "DRIBBLE"
 
         except Exception as e:
