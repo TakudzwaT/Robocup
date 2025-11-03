@@ -271,17 +271,68 @@ class Agent(Base_Agent):
             # Place central defenders in a compact midfield line between halfway and our goal
             # Middle X between halfway (0) and our goal (-15) -> -7.5
             mid_def_x = (0.0 + -15.0) * 0.5
-            if unum == 3:
-                defensive_pos = np.array([mid_def_x, 0.0])
-                defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
-                defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
-            if unum == 4:
-                # Support defender slightly to the side of the central defender
-                defensive_pos = np.array([mid_def_x, -3.0 if my_pos[1] <= 0 else 3.0])
-                defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
-                defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+            # Attackers act as wingers: advance forward from init_pos until they reach target distances from opponent goal
+            if unum in [2, 4, 5]:
+                # mapping: distance from opponent goal where attackers should stop (meters)
+                attacker_goal_dists = {2: 6.0, 4: 4.0, 5: 6.0}
+                target_dist = attacker_goal_dists.get(unum, 6.0)
+
+                # base target: keep lateral (y) from init_pos but move forward toward opponent goal
+                init = np.array(self.init_pos)
+                desired_x = min(opponent_goal[0] - target_dist, 14.0)
+                desired_y = init[1]
+                target_pos = np.array([desired_x, desired_y])
+
+                # Slight acute angle when near the opponent goal: pull y slightly toward center for sharper angles
+                if desired_x > (opponent_goal[0] - 8.0):
+                    target_pos[1] = target_pos[1] * 0.7  # bias toward center
+
+                # Avoid collisions with other attackers by enforcing minimum separation in y
+                MIN_SEPARATION = 3.5
+                for idx, tpos in enumerate(strategyData.teammate_positions):
+                    other_unum = idx + 1
+                    if tpos is None or other_unum == unum:
+                        continue
+                    if other_unum in [2, 4, 5]:
+                        other_pos = np.array(tpos)
+                        if abs(other_pos[0] - target_pos[0]) < 4.0:
+                            if abs(other_pos[1] - target_pos[1]) < MIN_SEPARATION:
+                                # push this player away in y to maintain separation
+                                if other_pos[1] > target_pos[1]:
+                                    target_pos[1] = other_pos[1] - MIN_SEPARATION
+                                else:
+                                    target_pos[1] = other_pos[1] + MIN_SEPARATION
+
+                # If the active player would collide with a teammate's spot, pick nearest free formation spot
+                formation_offsets = [-3.0, 0.0, 3.0]
+                if i_am_active:
+                    spots = [np.array([target_pos[0], target_pos[1] + off]) for off in formation_offsets]
+                    # choose nearest spot not too close to any teammate
+                    chosen = None
+                    for sp in sorted(spots, key=lambda s: np.linalg.norm(s - my_pos)):
+                        too_close = False
+                        for tpos in strategyData.teammate_positions:
+                            if tpos is None:
+                                continue
+                            if np.linalg.norm(np.array(tpos) - sp) < 2.0:
+                                too_close = True
+                                break
+                        if not too_close:
+                            chosen = sp
+                            break
+                    if chosen is not None:
+                        target_pos = chosen
+
+                # Clamp to field and move using obstacle-aware pathing
+                target_pos[0] = np.clip(target_pos[0], -14.8, 14.8)
+                target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
+                return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+
+            # Defenders / others hold their initial positions (with small clipping)
+            init = np.array(self.init_pos)
+            init[0] = np.clip(init[0], -14.8, 14.8)
+            init[1] = np.clip(init[1], -9.8, 9.8)
+            return self.move(tuple(init), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
 
             # other attackers fall back to safer positions
             target_x = max(ball_2d[0] - 3.0, -13.0)
