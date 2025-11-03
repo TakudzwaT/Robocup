@@ -134,6 +134,13 @@ class Agent(Base_Agent):
             return tuple(goal)
 
         my_p = np.array(my_pos)
+        # If the player is approaching the goal from an acute angle, prefer aiming center (15,0)
+        try:
+            angle_to_goal = math.degrees(math.atan2(goal[1] - my_p[1], goal[0] - my_p[0]))
+            if abs(angle_to_goal) > 18.0:
+                return tuple(goal)
+        except Exception:
+            pass
         goal_x = goal[0]
         y_candidates = np.linspace(-y_span, y_span, samples)
         best_cand = None
@@ -197,9 +204,10 @@ class Agent(Base_Agent):
         # Check if ball is in our defensive half (x < -2)
         ball_in_our_half = ball_2d[0] < -2.0
         # Detect likely opponent possession: opponent significantly closer to ball than any teammate
+        # Only treat as opponent possession if ball is in our half (we'll pressure otherwise)
         opp_has_possession = False
         try:
-            opp_has_possession = (strategyData.min_opponent_ball_dist + 0.5 < strategyData.min_teammate_ball_dist) and (strategyData.min_opponent_ball_dist < 2.0)
+            opp_has_possession = (strategyData.min_opponent_ball_dist + 0.5 < strategyData.min_teammate_ball_dist) and (strategyData.min_opponent_ball_dist < 2.0) and ball_in_our_half
         except Exception:
             opp_has_possession = False
         pm = strategyData.play_mode
