@@ -27,7 +27,7 @@ class Agent(Base_Agent):
         self.fat_proxy_walk = np.zeros(3)
 
         # Our goal is at -15, opponent goal at +15 (LEFT side)
-        self.init_pos = ([-14,0],[-5,4],[-9,0],[-5,-4],[-2.3,0],[-5,0],[-5,5],[-1,-6],[-1,-2.5],[-1,2.5],[-1,6])[unum-1]
+        self.init_pos = ([-14,0],[-1,4],[-9,0],[-1,-4],[-2.3,0],[-5,0],[-5,5],[-1,-6],[-1,-2.5],[-1,2.5],[-1,6])[unum-1]
 
 
     def beam(self, avoid_center_circle=False):
@@ -123,11 +123,12 @@ class Agent(Base_Agent):
         proj = a + t * ab
         return np.linalg.norm(p - proj)
 
-    def _choose_shot_target(self, strategyData, my_pos, goal=np.array([15.0, 0.0]), y_span=1.2, samples=9, min_safe=0.7):
+    def _choose_shot_target(self, strategyData, my_pos, goal=np.array([15.0, 0.0]), y_span=0.8, samples=9, min_safe=0.7):
         """
         Choose a shot target along the goal line (goal x, varying y) that maximizes
         the minimum distance to any opponent along the shot segment. If no candidate
-        is safer than min_safe, return the goal center.
+        is safer than min_safe, return the goal center. Uses a reduced y_span and adds
+        center bias to prefer more conservative shots.
         """
         opponents = [np.array(p) for p in strategyData.opponent_positions if p is not None]
         if len(opponents) == 0:
@@ -150,8 +151,11 @@ class Agent(Base_Agent):
             cand = np.array([goal_x, y])
             # compute min distance from any opponent to the shot segment
             min_dist = min((self._point_segment_distance(opp, my_p, cand) for opp in opponents), default=0.0)
-            if min_dist > best_min_dist:
-                best_min_dist = min_dist
+            # Add center bias - slightly prefer shots closer to center when safety is similar
+            center_bias = 1.0 - (abs(y) / y_span) * 0.15  # Max 15% penalty for corner shots
+            adjusted_dist = min_dist * center_bias
+            if adjusted_dist > best_min_dist:
+                best_min_dist = adjusted_dist
                 best_cand = cand
 
         if best_min_dist >= min_safe:
@@ -215,63 +219,55 @@ class Agent(Base_Agent):
         # ------------------ Handle set-pieces and special play modes ------------------
         # Our kickoff: active player should pass to a teammate instead of blindly kicking forward.
         if pm == self.world.M_OUR_KICKOFF:
-            if i_am_active:
-                # move to ball if not close
+            # Keep most players at their initial positions during our kickoff.
+            # Player 5 goes for the ball (closest), players 2 and 4 run forward to receive passes.
+            if unum == 5:
+                # Player 5: act as the kicker/runner for kickoff
                 if dist_to_ball > 0.6:
                     approach = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball)
-                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
-
-                # choose a teammate to pass to (must not be self)
-                best_target = None
-                best_score = -1.0
-                for idx, tpos in enumerate(strategyData.teammate_positions):
-                    if tpos is None or (idx + 1) == unum:
-                        continue
-                    t = np.array(tpos)
-                    forward_gain = (t[0] - my_pos[0])
-                    if forward_gain < 0.5:
-                        continue
-                    dist = np.linalg.norm(t - my_pos)
-                    if dist < 1.0 or dist > 12.0:
-                        continue
-                    min_opp_dist = min((np.linalg.norm(np.array(opp) - t) 
-                                       for opp in strategyData.opponent_positions if opp is not None), default=10.0)
-                    if min_opp_dist < 2.0:
-                        continue
-                    score = forward_gain * 2.0 - dist * 0.2
-                    if score > best_score:
-                        best_score = score
-                        best_target = t
-
-                if best_target is not None:
-                    return self.kickTarget(strategyData, my_pos, tuple(best_target), enable_pass_command=True)
+                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                 else:
-                    # fallback: short forward pass / safe kick to opponent goal direction
-                    shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
-                    return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
+                    # choose a teammate to pass to (prefer 2 or 4 if available)
+                    preferred = [2, 4]
+                    best_target = None
+                    for p_unum in preferred:
+                        try:
+                            tpos = strategyData.teammate_positions[p_unum - 1]
+                        except Exception:
+                            tpos = None
+                        if tpos is None:
+                            continue
+                        best_target = np.array(tpos)
+                        break
+
+                    if best_target is None:
+                        # fallback: safe shot toward opponent goal
+                        shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
+                        return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
+                    else:
+                        return self.kickTarget(strategyData, my_pos, tuple(best_target), enable_pass_command=True)
+            elif unum in [2, 4]:
+                # Players 2 and 4 run forward from their init positions to receive passes
+                init = np.array(self.init_pos)
+                target_pos = init.copy()
+                target_pos[0] = min(init[0] + 4.0, 14.0)
+                target_pos[1] = init[1]
+                target_pos[0] = np.clip(target_pos[0], -14.8, 14.8)
+                target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
+                return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
             else:
-                # Non-active players take conservative positions (don't chase during our kickoff)
-                if unum == 1:
-                    keeper_pos = np.array([-14.5, np.clip(ball_2d[1], -1.1, 1.1)])
-                    return self.move(keeper_pos, orientation=0, avoid_obstacles=False, timeout=800)
-                elif unum == 3:
-                    # defender holds middle
-                    return self.move(tuple(np.array([max(ball_2d[0]-2.0, -13.0), 0.0])), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
-                else:
-                    # attackers push a bit forward to receive passes
-                    target_x = min(ball_2d[0] + 4.0, 12.0)
-                    target_y = -3.0 if unum == 2 else (3.0 if unum == 5 else 0.0)
-                    target_pos = np.array([target_x, target_y])
-                    target_pos[0] = np.clip(target_pos[0], -14.8, 14.8)
-                    target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
-                    return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+                # All other players hold their initial positions
+                init = np.array(self.init_pos)
+                init[0] = np.clip(init[0], -14.8, 14.8)
+                init[1] = np.clip(init[1], -9.8, 9.8)
+                return self.move(tuple(init), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
 
         # Their kickoff: whole team stays defensive (don't chase)
         if pm == self.world.M_THEIR_KICKOFF:
             if unum == 1:
                 # keeper stays near goal line
                 keeper_pos = np.array([-14.5, np.clip(ball_2d[1], -1.1, 1.1)])
-                return self.move(keeper_pos, orientation=0, avoid_obstacles=False, timeout=800)
+                return self.move(keeper_pos, orientation=0, avoid_obstacles=True, timeout=800)
             # Place central defenders in a compact midfield line between halfway and our goal
             # Middle X between halfway (0) and our goal (-15) -> -7.5
             mid_def_x = (0.0 + -15.0) * 0.5
@@ -279,13 +275,13 @@ class Agent(Base_Agent):
                 defensive_pos = np.array([mid_def_x, 0.0])
                 defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
                 defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
+                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
             if unum == 4:
                 # Support defender slightly to the side of the central defender
                 defensive_pos = np.array([mid_def_x, -3.0 if my_pos[1] <= 0 else 3.0])
                 defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
                 defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
+                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
 
             # other attackers fall back to safer positions
             target_x = max(ball_2d[0] - 3.0, -13.0)
@@ -301,7 +297,7 @@ class Agent(Base_Agent):
                 # move to ball if not close
                 if dist_to_ball > 0.6:
                     approach = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball)
-                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
 
                 # pick a teammate to pass to (don't pass to self)
                 best_target = None
@@ -342,7 +338,7 @@ class Agent(Base_Agent):
                     # defenders / keeper keep defensive positions
                     if unum == 1:
                         keeper_pos = np.array([-14.5, np.clip(ball_2d[1], -1.1, 1.1)])
-                        return self.move(keeper_pos, orientation=0, avoid_obstacles=False, timeout=800)
+                        return self.move(keeper_pos, orientation=0, avoid_obstacles=True, timeout=800)
                     else:
                         default_defensive_x = min(ball_2d[0] - 2.0, -3.0)
                         default_defensive_x = min(default_defensive_x, 0.0)
@@ -350,7 +346,7 @@ class Agent(Base_Agent):
                         defensive_pos = np.array([default_defensive_x, default_y])
                         defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
                         defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                        return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
+                        return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
         
         #------------------------------------------------------
         # KEEPER LOGIC (unum == 1)
@@ -361,7 +357,7 @@ class Agent(Base_Agent):
             if ball_to_our_goal_dist < 6.0:
                 if dist_to_ball > 0.5:
                     approach = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball)
-                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                 else:
                         shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
                         return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
@@ -384,7 +380,7 @@ class Agent(Base_Agent):
                 if ball_2d[0] < -8.0 and dist_to_ball < 4.0:
                     if dist_to_ball > 0.5:
                         approach = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball)
-                        return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                        return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                     else:
                         shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
                         return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
@@ -393,7 +389,7 @@ class Agent(Base_Agent):
                     intercept_pos = closest_opp + 0.6 * opp_to_goal_vec
                     intercept_pos[0] = max(intercept_pos[0], -13.5)
                     intercept_pos[1] = np.clip(intercept_pos[1], -1.5, 1.5)
-                    return self.move(tuple(intercept_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                    return self.move(tuple(intercept_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
             
             # Check if closest to ball
             is_closest = True
@@ -409,13 +405,13 @@ class Agent(Base_Agent):
             if is_closest:
                 if dist_to_ball > 0.5:
                     approach = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball)
-                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                    return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                 else:
                     shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
                     return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
             else:
                 keeper_pos = np.array([-14.5, np.clip(ball_2d[1], -1.1, 1.1)])
-                return self.move(keeper_pos, orientation=0, avoid_obstacles=False, timeout=800)
+                return self.move(keeper_pos, orientation=0, avoid_obstacles=True, timeout=800)
         
         #------------------------------------------------------
         # ATTACKERS LOGIC (players 2, 4, 5)
@@ -469,14 +465,14 @@ class Agent(Base_Agent):
                         allow_direct_push = False
 
                     if allow_direct_push:
-                        return self.move(target_pt, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                        return self.move(target_pt, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                     else:
                         approach = self._approach_ball_pos(target_pt, my_pos, dist_to_ball)
-                        return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=600)
+                        return self.move(approach, orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=600)
                 
                 # CLOSE TO BALL - SHOOTING LOGIC
-                # Always shoot if within 5 units of opponent goal (NO PASS EVALUATION)
-                if dist_to_opp_goal <= 5.0:
+                # Always shoot if within 6 units of opponent goal (NO PASS EVALUATION)
+                if dist_to_opp_goal <= 6.0:
                     shot_target = self._choose_shot_target(strategyData, my_pos, opponent_goal)
                     return self.kickTarget(strategyData, my_pos, shot_target, enable_pass_command=True)
                 
@@ -567,63 +563,56 @@ class Agent(Base_Agent):
                 return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
         
         #------------------------------------------------------
-        # DEFENDER LOGIC (player 3)
+        # SIMPLIFIED DEFENDER (player 3) - behave like other agents but
+        # position in front of the opponent who is second-closest to our goal.
         else:  # unum == 3
-            
-            # Find opponents past defender
-            opponents_past = []
-            for idx, opp_pos in enumerate(strategyData.opponent_positions):
-                if opp_pos is None:
+            # If defender is the closest to the ball, go after the ball and kick it forward
+            is_closest = True
+            for idx, tpos in enumerate(strategyData.teammate_positions):
+                if tpos is None or (idx + 1) == unum:
                     continue
-                opp = np.array(opp_pos)
-                if opp[0] < my_pos[0]:
-                    opponents_past.append((opp, idx + 1))
-            
-            # Defend if multiple opponents past
-            if len(opponents_past) > 1:
-                opponents_past.sort(key=lambda x: x[0][0])
-                target_opponent = opponents_past[0][0]
-                
-                target_x = max(target_opponent[0] - 1.5, -14.0)
-                target_y = target_opponent[1]
-                target_x = min(target_x, 0.0)
-                
-                target_pos = np.array([target_x, target_y])
-                target_pos[0] = np.clip(target_pos[0], -14.8, 0.0)
-                target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
-                
-                return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
-            else:
-                    # If defender is the closest to the ball, go after the ball and kick it forward
-                    is_closest = True
-                    for idx, tpos in enumerate(strategyData.teammate_positions):
-                        if tpos is None or (idx + 1) == unum:
-                            continue
-                        t_dist = np.linalg.norm(np.array(tpos) - ball_2d)
-                        if t_dist < (dist_to_ball - 0.5):
-                            is_closest = False
-                            break
-                
-                    if is_closest:
-                        if dist_to_ball > 0.5:
-                            target_pos = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball, stop_dist=0.45)
-                            return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
-                        else:
-                            # Kick ball forward toward opponent goal
-                            shot_target = self._choose_shot_target(strategyData, my_pos, goal=opponent_goal)
-                            return self.kickTarget(strategyData, mypos_2d=my_pos, target_2d=shot_target)
-                    else:
-                        # Usual positioning logic (fallback)
-                        default_defensive_x = min(ball_2d[0] - 2.0, -3.0)
-                        default_defensive_x = min(default_defensive_x, 0.0)
-                    
-                        default_y = my_pos[1] * 0.8 if abs(my_pos[1]) < 3.0 else 0.0
-                    
-                        defensive_pos = np.array([default_defensive_x, default_y])
-                        defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
-                        defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
-                    
-                        return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
+                t_dist = np.linalg.norm(np.array(tpos) - ball_2d)
+                if t_dist < (dist_to_ball - 0.5):
+                    is_closest = False
+                    break
+
+            if is_closest:
+                if dist_to_ball > 0.5:
+                    target_pos = self._approach_ball_pos(ball_2d, my_pos, dist_to_ball, stop_dist=0.45)
+                    return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+                else:
+                    shot_target = self._choose_shot_target(strategyData, my_pos, goal=opponent_goal)
+                    return self.kickTarget(strategyData, mypos_2d=my_pos, target_2d=shot_target)
+
+            opponents = [np.array(p) for p in strategyData.opponent_positions if p is not None]
+
+            # If we have at least two opponents, find the one that is second-closest to our goal
+            if len(opponents) >= 2:
+                opponents_sorted = sorted(opponents, key=lambda o: np.linalg.norm(o - our_goal))
+                target_opp = opponents_sorted[1]
+
+                # Place player 3 slightly between that opponent and our goal to block passes
+                opp_to_goal_vec = our_goal - target_opp
+                if np.linalg.norm(opp_to_goal_vec) > 0.001:
+                    intercept_pos = target_opp + 0.6 * opp_to_goal_vec
+                else:
+                    intercept_pos = target_opp.copy()
+
+                # Keep inside field bounds
+                intercept_pos[0] = np.clip(intercept_pos[0], -14.8, 14.8)
+                intercept_pos[1] = np.clip(intercept_pos[1], -9.8, 9.8)
+
+                return self.move(tuple(intercept_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+
+            # Fallback: behave like a conservative defender (similar to other code paths)
+            default_defensive_x = min(ball_2d[0] - 2.0, -3.0)
+            default_defensive_x = min(default_defensive_x, 0.0)
+            default_y = my_pos[1] * 0.8 if abs(my_pos[1]) < 3.0 else 0.0
+            defensive_pos = np.array([default_defensive_x, default_y])
+            defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
+            defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
+
+            return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
         
     
     #--------------------------------------- Fat proxy auxiliary methods
