@@ -272,23 +272,28 @@ class Agent(Base_Agent):
                 # keeper stays near goal line
                 keeper_pos = np.array([-14.5, np.clip(ball_2d[1], -1.1, 1.1)])
                 return self.move(keeper_pos, orientation=0, avoid_obstacles=False, timeout=800)
-            elif unum == 3:
-                # central defender - stay between ball and goal
-                default_defensive_x = min(ball_2d[0] - 2.0, -3.0)
-                default_defensive_x = min(default_defensive_x, 0.0)
-                default_y = my_pos[1] * 0.8 if abs(my_pos[1]) < 3.0 else 0.0
-                defensive_pos = np.array([default_defensive_x, default_y])
+            # Place central defenders in a compact midfield line between halfway and our goal
+            # Middle X between halfway (0) and our goal (-15) -> -7.5
+            mid_def_x = (0.0 + -15.0) * 0.5
+            if unum == 3:
+                defensive_pos = np.array([mid_def_x, 0.0])
                 defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
                 defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
                 return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
-            else:
-                # attackers fall back to safer positions
-                target_x = max(ball_2d[0] - 3.0, -13.0)
-                target_y = -3.0 if unum == 2 else (3.0 if unum == 5 else 0.0)
-                target_pos = np.array([target_x, target_y])
-                target_pos[0] = np.clip(target_pos[0], -14.8, 14.8)
-                target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
-                return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
+            if unum == 4:
+                # Support defender slightly to the side of the central defender
+                defensive_pos = np.array([mid_def_x, -3.0 if my_pos[1] <= 0 else 3.0])
+                defensive_pos[0] = np.clip(defensive_pos[0], -14.8, 0.0)
+                defensive_pos[1] = np.clip(defensive_pos[1], -9.8, 9.8)
+                return self.move(tuple(defensive_pos), orientation=strategyData.ball_dir, avoid_obstacles=False, timeout=800)
+
+            # other attackers fall back to safer positions
+            target_x = max(ball_2d[0] - 3.0, -13.0)
+            target_y = -3.0 if unum == 2 else (3.0 if unum == 5 else 0.0)
+            target_pos = np.array([target_x, target_y])
+            target_pos[0] = np.clip(target_pos[0], -14.8, 14.8)
+            target_pos[1] = np.clip(target_pos[1], -9.8, 9.8)
+            return self.move(tuple(target_pos), orientation=strategyData.ball_dir, avoid_obstacles=True, timeout=800)
 
         # Our corner kick / free kick: push attackers forward and the active player should look for a pass (not to self)
         if pm in (self.world.M_OUR_CORNER_KICK, self.world.M_OUR_FREE_KICK):
